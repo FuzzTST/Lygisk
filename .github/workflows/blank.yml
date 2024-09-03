@@ -1,0 +1,107 @@
+name: build
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+    secrets:
+      KEYSTORE:
+        required: true
+      KEYSTORE_KEY:
+        required: true
+
+jobs:
+  ci-build:
+    name: Lygisk Build ${{ inputs.branch }}
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIRECT: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ci-build-${{ inputs.branch }}
+          submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Set up sccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          variant: sccache
+          key: ${{ runner.os }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}
+          max-size: 10000M
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            !~/.gradle/caches/build-cache-*
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle.kts') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      - name: Cache build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/build-cache-*
+          key: ${{ runner.os }}-build-cache-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-build-cache-
+
+      - name: Set up NDK
+        run: python build.py -v ndk
+
+      - name: Set version
+        if: inputs.branch == 'stable' || inputs.branch == 'beta'
+        run: |
+          VERSION_CODE=$(cat gradle.properties | grep 'magisk.versionCode' | cut -f2 -d '=')
+          echo version=v$(echo $VERSION_CODE | cut -c1-2).$(echo $VERSION_CODE | cut -c1-2 --complement) > config.prop
+
+      - name: Import signing config
+        run: |
+          echo "${{ secrets.KEYSTORE }}" | base64 -d > keystore.jks
+          echo "keyStore=keystore.jks" >> config.prop
+          echo "keyStorePass=${{ secrets.KEYSTORE_KEY }}" >> config.prop
+          echo "keyAlias=lygisk" >> config.prop
+          echo "keyPass=${{ secrets.KEYSTORE_KEY }}" >> config.prop
+
+      - name: Build release
+        run: |
+          python build.py -vr all
+          
+      - name: Build debug
+        run: |
+          python build.py -v all
+          
+      - name: Stop gradle daemon
+        run: ./gradlew --stop
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.branch }}
+          path: out
+          compression-level: 9
+
+      - name: Upload mapping and native debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.branch }}-symbols
+          path: app/build/outputs
+          compression-level: 9
